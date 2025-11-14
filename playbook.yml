@@ -1,0 +1,283 @@
+---
+# Ansible Playbook: Deploy Exim SMTP Relay on Ubuntu 24 LTS
+# Purpose: Configure Exim4 as an SMTP relay server for local network
+# Author: Automated generation
+# Target: Ubuntu 24.04 LTS
+
+- name: Deploy and Configure Exim SMTP Relay Server
+  hosts: mail_relay
+  become: true
+  vars:
+    # Network configuration
+    local_network: "192.168.1.0/24"  # Change to your local network range
+    relay_domains: ""  # Domains to relay for (leave empty for local relay only)
+    mail_name: "{{ ansible_fqdn }}"  # Server's fully qualified domain name
+    
+    # Exim configuration type: 'internet' for relay server
+    exim_config_type: "internet site; mail is sent and received directly using SMTP"
+    
+    # Listen on all interfaces (empty) or specific IPs
+    local_interfaces: ""  # Empty = listen on all interfaces
+    
+    # Additional hostnames that this server accepts mail for
+    other_hostnames: "{{ ansible_hostname }}"
+    
+    # TLS/SSL settings
+    enable_tls: true
+    tls_certificate: "/etc/exim4/exim.crt"
+    tls_privatekey: "/etc/exim4/exim.key"
+    
+    # Security settings
+    enable_rate_limiting: true
+    smtp_accept_max_per_host: 20
+    
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags:
+        - setup
+        - packages
+
+    - name: Install Exim4 and required packages
+      ansible.builtin.apt:
+        name:
+          - exim4-daemon-light
+          - exim4-base
+          - exim4-config
+          - mailutils
+          - swaks  # SMTP testing tool
+        state: present
+      tags:
+        - setup
+        - packages
+
+    - name: Ensure Debian-exim user exists
+      ansible.builtin.user:
+        name: Debian-exim
+        system: yes
+        shell: /usr/sbin/nologin
+        createhome: no
+      tags:
+        - setup
+
+    - name: Configure Exim4 - Set configuration type
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/dc_eximconfig_configtype
+        value: "{{ exim_config_type }}"
+        vtype: select
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Configure Exim4 - Set mail name
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/mailname
+        value: "{{ mail_name }}"
+        vtype: string
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Configure Exim4 - Set local interfaces
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/dc_local_interfaces
+        value: "{{ local_interfaces }}"
+        vtype: string
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Configure Exim4 - Set other hostnames
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/dc_other_hostnames
+        value: "{{ other_hostnames }}"
+        vtype: string
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Configure Exim4 - Set relay networks
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/dc_relay_nets
+        value: "{{ local_network }}"
+        vtype: string
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Configure Exim4 - Set relay domains
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/dc_relay_domains
+        value: "{{ relay_domains }}"
+        vtype: string
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Configure Exim4 - Disable minimal DNS queries
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/dc_minimaldns
+        value: "false"
+        vtype: boolean
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Configure Exim4 - Use single config file
+      ansible.builtin.debconf:
+        name: exim4-config
+        question: exim4/use_split_config
+        value: "false"
+        vtype: boolean
+      notify: reconfigure exim4
+      tags:
+        - configuration
+
+    - name: Create custom Exim4 configuration file
+      ansible.builtin.template:
+        src: update-exim4.conf.conf.j2
+        dest: /etc/exim4/update-exim4.conf.conf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+      notify:
+        - update exim4 config
+        - restart exim4
+      tags:
+        - configuration
+
+    - name: Create custom Exim4 local configuration (security hardening)
+      ansible.builtin.template:
+        src: exim4.conf.localmacros.j2
+        dest: /etc/exim4/exim4.conf.localmacros
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+      when: enable_rate_limiting
+      notify:
+        - update exim4 config
+        - restart exim4
+      tags:
+        - configuration
+        - security
+
+    - name: Generate self-signed TLS certificate for Exim
+      ansible.builtin.command:
+        cmd: >
+          openssl req -x509 -newkey rsa:4096 -nodes
+          -keyout {{ tls_privatekey }}
+          -out {{ tls_certificate }}
+          -days 365
+          -subj "/C=BR/ST=State/L=City/O=Organization/CN={{ mail_name }}"
+        creates: "{{ tls_certificate }}"
+      when: enable_tls
+      notify: restart exim4
+      tags:
+        - security
+        - tls
+
+    - name: Set correct permissions on TLS certificate
+      ansible.builtin.file:
+        path: "{{ tls_certificate }}"
+        owner: root
+        group: Debian-exim
+        mode: '0644'
+      when: enable_tls
+      tags:
+        - security
+        - tls
+
+    - name: Set correct permissions on TLS private key
+      ansible.builtin.file:
+        path: "{{ tls_privatekey }}"
+        owner: root
+        group: Debian-exim
+        mode: '0640'
+      when: enable_tls
+      tags:
+        - security
+        - tls
+
+    - name: Ensure Exim4 service is enabled and started
+      ansible.builtin.systemd:
+        name: exim4
+        enabled: yes
+        state: started
+      tags:
+        - service
+
+    - name: Configure firewall - Allow SMTP (port 25)
+      ansible.builtin.ufw:
+        rule: allow
+        port: '25'
+        proto: tcp
+        comment: 'Exim SMTP'
+      when: ansible_facts.services['ufw.service'] is defined
+      tags:
+        - firewall
+        - security
+
+    - name: Configure firewall - Allow submission port (587)
+      ansible.builtin.ufw:
+        rule: allow
+        port: '587'
+        proto: tcp
+        comment: 'Exim Submission'
+      when: ansible_facts.services['ufw.service'] is defined
+      tags:
+        - firewall
+        - security
+
+    - name: Verify Exim4 is listening on expected ports
+      ansible.builtin.wait_for:
+        port: 25
+        host: 0.0.0.0
+        timeout: 10
+        state: started
+      tags:
+        - validation
+
+    - name: Display Exim version
+      ansible.builtin.command: exim4 --version
+      register: exim_version
+      changed_when: false
+      tags:
+        - validation
+
+    - name: Show Exim version
+      ansible.builtin.debug:
+        var: exim_version.stdout_lines
+      tags:
+        - validation
+
+  handlers:
+    - name: reconfigure exim4
+      ansible.builtin.command: dpkg-reconfigure -fnoninteractive exim4-config
+      listen: reconfigure exim4
+
+    - name: update exim4 config
+      ansible.builtin.command: update-exim4.conf
+      listen: update exim4 config
+
+    - name: restart exim4
+      ansible.builtin.systemd:
+        name: exim4
+        state: restarted
+      listen: restart exim4
+
+    - name: reload exim4
+      ansible.builtin.systemd:
+        name: exim4
+        state: reloaded
+      listen: reload exim4

@@ -1,0 +1,36 @@
+# {{ ansible_managed }}
+# /etc/exim4/exim4.conf.localmacros
+#
+# Custom Exim4 local configuration macros
+# Security hardening and rate limiting
+
+# Enable TLS
+{% if enable_tls %}
+MAIN_TLS_ENABLE = yes
+MAIN_TLS_CERTIFICATE = {{ tls_certificate }}
+MAIN_TLS_PRIVATEKEY = {{ tls_privatekey }}
+{% endif %}
+
+# Rate limiting - prevent spam/abuse
+{% if enable_rate_limiting %}
+smtp_accept_max = 100
+smtp_accept_max_per_connection = 50
+smtp_accept_max_per_host = {{ smtp_accept_max_per_host }}
+smtp_accept_queue_per_connection = 50
+{% endif %}
+
+# Reject connections from hosts without reverse DNS
+# host_reject_connection = ${if !def:sender_host_name}
+
+# Additional security options
+# Disable VRFY and EXPN commands to prevent user enumeration
+smtp_verify = false
+smtp_expn_hosts =
+
+# Log more information for debugging
+log_selector = +all -skip_delivery -tls_cipher -tls_peerdn
+
+# RFC compliance
+rfc1413_query_timeout = 0s
+ignore_bounce_errors_after = 2d
+timeout_frozen_after = 7d
